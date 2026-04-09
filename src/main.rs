@@ -48,4 +48,17 @@ fn test_function() {
 	let output_2 = hasher.hash(&[output_1,sk]).unwrap();
 	let output_3 = hasher.hash(&[output_2,time]).unwrap();
 	let output = hasher.hash(&[output_3,period]).unwrap();
+
+    let mut root:Vec<BlsFr> = vec![];
+
+    let mut leav_vec = vec![];
+
+    for i in 0 ..2_i32.pow(10) {
+        leav_vec.push(BlsFr::rand(rng));
+    }
+
+    leav_vec[(2_i32.pow(10) - 1) as usize] = leaf;
+
+    let tag:Vec<bool> = vec![false;10];
+    let mut path:Vec<BlsFr> = vec![];
 }
