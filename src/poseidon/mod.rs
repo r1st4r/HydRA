@@ -7,6 +7,11 @@ use arkworks_utils::{
 use arkworks_native_gadgets::poseidon::{
     sbox::PoseidonSbox, Poseidon, PoseidonParameters,
 };
+pub fn PoseidonSetup(curve: Curve, exp: i8, width: u8) -> Poseidon<BlsFr>{
+    let para = setup_params(curve, exp, width);
+    let hasher = Poseidon:<BlsFr>::new(para);
+    hasher
+}
 
 fn setup_params<F: PrimeField>(curve: Curve, exp: i8, width: u8) -> PoseidonParameters<F> {
     let pos_data = setup_poseidon_params(curve, exp, width).unwrap();
