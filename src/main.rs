@@ -9,6 +9,9 @@ use arkworks_native_gadgets::poseidon::FieldHasher;
 
 use ark_std::UniformRand;
 
+use HydRA::poseidon::PoseidonSetup;
+
+
 fn main() {
     let rng = &mnt ark_std::test_rng();
     let mut b_tree = Vec::new();
@@ -61,4 +64,5 @@ fn test_function() {
 
     let tag:Vec<bool> = vec![false;10];
     let mut path:Vec<BlsFr> = vec![];
+
 }
