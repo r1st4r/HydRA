@@ -25,3 +25,26 @@ pub fn BuildShrubs(mut root: &mut Vec<BlsFr>, leaf: &[BlsFr], mut path: &mut Vec
         BuildShrubs( &mut root, &temp, &mut path, hasher);
     }
 }
+
+pub fn Build_Static_Shrubs(mut root: &mut Vec<BlsFr>, leaves: &[BlsFr], hasher: Poseidon::<BlsFr>) {
+    let len = leaves.len();
+    if len == 0 {
+        return 
+    }
+
+    let temp: Vec<BlsFr> = leaves
+        .par_chunks(2)
+        .filter(|chunk| chunk.len() == 2)
+        .map(|chunk| {
+            let a = chunk[0];
+            let b = chunk[1];
+            hasher.hash(&[a,b]).unwrap()
+        })
+        .collect();
+    let last_i = if len % 2 == 0 { len - 2 } else { len - 1 };
+    root.push(leaves[last_i]);
+
+    if !temp.is_empty() {
+        Build_Static_Shrubs(root, &temp, hasher);
+    }
+}
