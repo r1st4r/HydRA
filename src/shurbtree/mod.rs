@@ -26,6 +26,10 @@ pub fn BuildShrubs(mut root: &mut Vec<BlsFr>, leaf: &[BlsFr], mut path: &mut Vec
     }
 }
 
+pub fn Find_Path(leaves: &[BlsFr], leaf: BlsFr, value: usize, mut path: &mut Vec<BlsFr>, mut index: &mut Vec<bool>, hasher: Poseidon::<BlsFr>) {
+    // Implementation for finding the path in the Merkle tree
+}
+
 pub fn Build_Static_Shrubs(mut root: &mut Vec<BlsFr>, leaves: &[BlsFr], hasher: Poseidon::<BlsFr>) {
     let len = leaves.len();
     if len == 0 {
