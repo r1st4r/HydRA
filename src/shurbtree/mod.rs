@@ -53,12 +53,27 @@ pub fn Build_Static_Shrubs(mut root: &mut Vec<BlsFr>, leaves: &[BlsFr], hasher: 
     }
 }
 
-pub fn Find_Shrubs_Path(leaves: &[BlsFr], value: usize, mut path: &mut Vec<BlsFr>, mut index: &mut Vec<bool>, hasher: Poseidon::<BlsFr>) {
+pub fn Find_Shrubs_Path (leaves: &[BlsFr], value: usize, mut path: &mut Vec<BlsFr>, mut index: &mut Vec<bool>, hasher: Poseidon::<BlsFr>) {
     if value % 2 == 1 {
         index.push(false);
         path.push(leaves[value - 1]);
     } else {
         index.push(true);
         path.push(leaves[value + 1]);
+    }
+
+    let temp: Vec<BlsFr> = leaves
+        .par_chunks(2)
+        .filter(|chunk| chunk.len() == 2)
+        .map(|chunk| {
+            let a = chunk[0];
+            let b = chunk[1];
+            hasher.hash(&[a,b]).unwrap()
+        })
+        .collect();
+
+    if temp.len() >= 2 {
+        let val = value / 2;
+        Find_Shrubs_Path(&temp, val, &mut path, &mut index, hasher);
     }
 }
