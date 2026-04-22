@@ -24,3 +24,9 @@ impl<'a, F: PrimeField, HG: FieldHasherGadget<F>> TestCircuit<'a, F, HG> {
         Self {pk, sk, ar, time, period, output, root, path, tag, hasher}
     }
 }
+
+impl<'a, F: PrimeField, HG: FieldHasherGadget<F>> Clone for TestCircuit<'a, F, HG> {
+    fn clone(&self) -> Self {
+
+    }
+}
