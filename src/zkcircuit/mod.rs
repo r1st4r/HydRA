@@ -41,3 +41,9 @@ impl<'a, F: PrimeField, HG: FieldHasherGadget<F>> Clone for TestCircuit<'a, F, H
         }
     }
 }
+
+impl<'a, F: PrimeField, HG: FieldHasherGadget<F>> ConstraintSynthesizer<F> for TestCircuit<'a, F, HG> {
+    fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
+        
+    }
+}
