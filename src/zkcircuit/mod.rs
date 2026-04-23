@@ -44,6 +44,14 @@ impl<'a, F: PrimeField, HG: FieldHasherGadget<F>> Clone for TestCircuit<'a, F, H
 
 impl<'a, F: PrimeField, HG: FieldHasherGadget<F>> ConstraintSynthesizer<F> for TestCircuit<'a, F, HG> {
     fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
-        
+        let sk = FpVar::new_witness(cs.clone(), || Ok(self.sk))?;
+        let ar = FpVar::new_witness(cs.clone(), || Ok(self.ar))?;
+        let path: Vec<_> = self.path.iter().map(|x| FpVar::<F>::new_witness(cs.clone(), || Ok(x)).unwrap()).collect();
+        let pk = FpVar::<F>::new_input(cs.clone(), || Ok(&self.pk))?;
+        let root = FpVar::<F>::new_input(cs.clone(), || Ok(&self.root))?;
+        let output = FpVar::<F>::new_input(cs.clone(), || Ok(&self.output))?;
+        let time = FpVar::<F>::new_input(cs.clone(), || Ok(&self.time))?;
+        let period = FpVar::<F>::new_input(cs.clone(), || Ok(&self.period))?;
+        let hasher_gadget: HG = FieldHasherGadget::<F>::from_native(&mut cs.clone(), self.hasher)?;
     }
 }
