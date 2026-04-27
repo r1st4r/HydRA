@@ -53,5 +53,25 @@ impl<'a, F: PrimeField, HG: FieldHasherGadget<F>> ConstraintSynthesizer<F> for T
         let time = FpVar::<F>::new_input(cs.clone(), || Ok(&self.time))?;
         let period = FpVar::<F>::new_input(cs.clone(), || Ok(&self.period))?;
         let hasher_gadget: HG = FieldHasherGadget::<F>::from_native(&mut cs.clone(), self.hasher)?;
+
+        let m = hasher_gadget.hash(&[ar.clone(), sk.clone()])?;
+        let mut leaf = hasher_gadget.hash(&[m, pk.clone()])?;
+
+        for i in 0..self.tag.len() {
+            if self.tag[i] == true {
+                leaf = hasher_gadget.hash(&leaf.clone(), path[i].clone())?;
+            } else {
+                leaf = hasher_gadget.hash(&path[i].clone(), leaf.clone())?;
+            }
+        }
+        root.enforce_equal(&leaf)?;
+
+        let result_1 = hasher_gadget.hash(&[pk,ar])?;
+        let result_2 = hasher_gadget.hash(&[result_1,sk])?;
+        let result_3 = hasher_gadget.hash(&[result_2,time])?;
+        let result_4 = hasher_gadget.hash(&[result_3,period])?;
+        output.enforce_equal(&result_4)?;
+
+        Ok(())
     }
 }
