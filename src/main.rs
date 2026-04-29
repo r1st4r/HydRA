@@ -11,11 +11,12 @@ use ark_std::UniformRand;
 
 use HydRA::poseidon::PoseidonSetup;
 
+const LEN: usize = 10;
 
 fn main() {
     let rng = &mnt ark_std::test_rng();
     let mut b_tree = Vec::new();
-    for i in 0.2_i32.pow(10) {
+    for i in 0.2_i32.pow(LEN) {
         b_tree.push(BlsFr::rand(rng));
     }
     let mut root = vec![];
@@ -56,13 +57,17 @@ fn test_function() {
 
     let mut leav_vec = vec![];
 
-    for i in 0 ..2_i32.pow(10) {
+    for i in 0 ..2_i32.pow(LEN) {
         leav_vec.push(BlsFr::rand(rng));
     }
 
-    leav_vec[(2_i32.pow(10) - 1) as usize] = leaf;
+    leav_vec[(2_i32.pow(LEN) - 1) as usize] = leaf;
 
-    let tag:Vec<bool> = vec![false;10];
+    let tag:Vec<bool> = vec![false;LEN];
     let mut path:Vec<BlsFr> = vec![];
+
+    BuildShrubs(&mut root, &leav_vec, 1023, &mut path1, &mut tag1, hasher.clone());
+
+    let circuit = PoseidonC::new(pk, sk, ar, time, period, output, root[LEN], &path1, &tag1, hasher);
 
 }
