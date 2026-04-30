@@ -1,4 +1,4 @@
  
 [workspace]
-members = ["dqea","smart_tree"]
+members = ["dqea", "hydra_system","smart_tree"]
 resolver = "2"
