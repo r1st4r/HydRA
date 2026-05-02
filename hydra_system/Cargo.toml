@@ -4,3 +4,4 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arkworks-r1cs-gadgets = { version = "1.2.0", default-features = false }
