@@ -46,4 +46,4 @@ parallel = [
 "ark-ff/parallel",
  "ark-std/parallel",
 "ark-r1cs-std/parallel",
- 
+ ]
