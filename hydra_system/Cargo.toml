@@ -23,3 +23,4 @@ ark-groth16 = { version = "^0.3.0", default-features = false }
 ark-poly-commit = { version = "^0.3.0", default-features = false }
 ark-poly = { version = "^0.3.0", default-features = false }
 ark-snark = { version = "^0.3.0", default-features = false }
+blake2 = { version = "0.9", default-features = false }
