@@ -17,3 +17,4 @@ ark-snark = "0.3.0"
 ark-crypto-primitives  = "0.3.0"
 rayon = "1.11.0"
 [dev-dependencies]
+ark-crypto-primitives = { version = "^0.3.0", features = ["r1cs"], default-features = false }
