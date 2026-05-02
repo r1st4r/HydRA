@@ -16,3 +16,5 @@ ark-groth16 = "0.3.0"
 ark-snark = "0.3.0"
 ark-crypto-primitives  = "0.3.0"
 rayon = "1.11.0"
+
+[dev-dependencies]
