@@ -34,6 +34,6 @@ ark-bls12-381 = { version = "^0.3.0", default-features = false, features = [ "cu
 std = [
   "ark-std/std",
   "arkworks-r1cs-gadgets/std",
-
+ "arkworks-native-gadgets/std",
 
   
