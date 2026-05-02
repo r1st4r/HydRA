@@ -44,6 +44,6 @@ std = [
 
 parallel = [
 "ark-ff/parallel",
-
+ "ark-std/parallel",
 
  
