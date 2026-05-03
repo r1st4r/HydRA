@@ -30,3 +30,4 @@ ark-bls12-381 = { version = "^0.3.0", default-features = false, features = [ "cu
 [features]
 default = ["std"]
 std = [
+"ark-std/std",
