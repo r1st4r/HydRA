@@ -1,30 +1,29 @@
-```markdown
 # HydRA
 
-HydRA 是一种新型的**动态混合远程证明**方案，结合了交互式远程证明与非交互式远程证明机制，支持公开可验证性、证据透明度和无信任验证。
+HydRA is a novel **dynamic hybrid remote attestation** solution. It combines both **interactive remote attestation** and **non-interactive remote attestation**, supporting public verifiability, evidence transparency, and trustless verification.
 
-HydRA 优先采用非交互式远程证明，以提升证明效率；仅在必要情况下使用交互式远程证明，以增强系统的适应性和安全性。此外，HydRA 支持目标设备的动态批量添加与移除，适用于具有动态节点管理需求的可信计算场景。
+HydRA prioritizes non-interactive remote attestation for efficiency and only falls back to interactive remote attestation when necessary. In addition, HydRA supports the dynamic batch addition and removal of target devices, making it suitable for flexible and scalable trusted computing scenarios.
 
-## 功能特点
+## Features
 
-- 支持混合远程证明机制
-- 结合交互式与非交互式远程证明
-- 支持公开可验证性
-- 支持证明证据透明化
-- 支持无信任验证
-- 支持目标设备动态批量添加与移除
-- 基于 Rust 语言实现
+- Hybrid remote attestation mechanism
+- Support for both interactive and non-interactive remote attestation
+- Publicly verifiable attestation results
+- Transparent attestation evidence
+- Trustless verification
+- Dynamic batch addition and removal of target devices
+- Pure Rust implementation
 
-## 项目结构
+## Project Structure
 
-HydRA 是一个纯 Rust 实现的项目，主要包括以下两个模块：
+The HydRA project is implemented entirely in Rust and mainly consists of two modules:
 
-- `dqea`：用于实现分布式数字签名机制。
-- `hydra_system`：用于实现 HydRA 远程证明系统。
+- `dqea`: implements the distributed digital signature mechanism.
+- `hydra_system`: implements the remote attestation system based on HydRA.
 
-## 快速开始
+## Getting Started
 
-克隆项目到本地：
+Clone the repository:
 
 ```bash
 git clone https://github.com/r1st4r/HydRA.git
