@@ -12,6 +12,8 @@ use smart_tree::poseidon::PoseidonSetup;
 use smart_tree::zkcircuit::TestCircuit;
 use smart_tree::shurbstree::{BuildShrubs,Build_Static_Shrubs, Find_Shrubs_Path};
 type GrothSetup = Groth16<Bls12_381>;
+type PoseidonC<'a> = TestCircuit<'a, Fr, PoseidonGadget<Fr>>;
+
 fn main() {
     println!("Hello, world!");
 }
