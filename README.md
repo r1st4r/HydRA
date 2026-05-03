@@ -27,7 +27,7 @@ Clone the repository:
 
 ```bash
 git clone https://github.com/r1st4r/HydRA.git
-
+```
 cd HydRA
 
 cargo build
