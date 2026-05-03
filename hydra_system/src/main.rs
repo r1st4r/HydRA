@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use arkworks_native_gadgets::poseidon::FieldHasher;
 
-
+use ark_std::UniformRand;
 
 fn main() {
     println!("Hello, world!");
