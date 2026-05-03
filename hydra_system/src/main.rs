@@ -20,7 +20,7 @@ fn main() {
     let mut b_tree = Vec::new();
     for i in 0..2_i32.pow(LEN as u32) {
          b_tree.push(Fr::rand(rng));
-
+}
 
 
 
