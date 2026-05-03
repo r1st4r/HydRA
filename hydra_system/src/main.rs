@@ -9,6 +9,7 @@ use arkworks_native_gadgets::poseidon::FieldHasher;
 
 use ark_std::UniformRand;
 use smart_tree::poseidon::PoseidonSetup;
+use smart_tree::zkcircuit::TestCircuit;
 fn main() {
     println!("Hello, world!");
 }
