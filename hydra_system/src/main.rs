@@ -17,7 +17,7 @@ const LEN: usize = 10;
 
 fn main() {
     println!("Hello, world!");
-
+    let mut b_tree = Vec::new();
 
 
 
