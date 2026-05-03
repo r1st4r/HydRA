@@ -28,3 +28,4 @@ digest = { version = "0.9" }
 ark-bls12-381 = { version = "^0.3.0", default-features = false, features = [ "curve" ] }
 
 [features]
+default = ["std"]
