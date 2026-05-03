@@ -36,3 +36,4 @@ std = [
 "ark-ff/std",
 "ark-r1cs-std/std",
   "ark-relations/std",
+]
