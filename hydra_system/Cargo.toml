@@ -34,3 +34,4 @@ std = [
   "arkworks-r1cs-gadgets/std",
  "arkworks-native-gadgets/std",
 "ark-ff/std",
+"ark-r1cs-std/std",
