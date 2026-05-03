@@ -21,6 +21,7 @@ fn main() {
     for i in 0..2_i32.pow(LEN as u32) {
          b_tree.push(Fr::rand(rng));
 }
+    
 let mut root = vec![];
 
 
