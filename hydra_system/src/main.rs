@@ -5,7 +5,7 @@ use arkworks_r1cs_gadgets::poseidon::PoseidonGadget;
 use arkworks_utils::Curve;
 use std::time::Instant;
 
-
+use arkworks_native_gadgets::poseidon::FieldHasher;
 
 
 
