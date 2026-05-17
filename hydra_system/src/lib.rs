@@ -23,6 +23,8 @@ use ark_std::UniformRand;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::io::{Cursor, Read};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use anyhow::{Context, Result, bail};
 
 
@@ -37,6 +39,12 @@ pub const VERIFIER_KEY_FILE: &str = "verifier_key.bin";
 pub const VERIFIER_RESPONSE_FILE: &str = "dev_res.bin";
 pub const PUBLIC_CONTEXT_FILE: &str = "public_context.bin";
 pub const EVIDENCE_FILE: &str = "evidence.bin";
+
+pub const DEFAULT_VERIFIER_ADDR: &str = "127.0.0.1:7001";
+pub const DEFAULT_RELYING_PARTY_ADDR: &str = "127.0.0.1:7002";
+pub const MAX_TCP_FRAME_LEN: u64 = 512 * 1024 * 1024;
+pub const MSG_PUBLIC_CONTEXT: &[u8; 4] = b"PUBC";
+pub const MSG_EVIDENCE: &[u8; 4] = b"EVID";
 
 pub fn project_root_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -511,8 +519,7 @@ pub fn gen_new_leaves() -> Vec<BlsScalar> {
         .collect()
 }
 
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PublicContext {
     pub root: Vec<BlsScalar>,
     pub verifier_pk: VerifyingKey<Secp256k1>,
@@ -747,6 +754,204 @@ fn append_ark_vk(out: &mut Vec<u8>, value: &ArkVerifyingKey<Bls12_381>) -> Resul
 
 fn read_ark_vk(cursor: &mut Cursor<&[u8]>) -> Result<ArkVerifyingKey<Bls12_381>> {
     decode_ark_vk(&read_len_bytes(cursor)?)
+}
+
+
+pub fn encode_key_infor(key: &KeyInfor) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    append_len_bytes(&mut out, &key.signing_key.to_bytes()[..]);
+    Ok(out)
+}
+
+pub fn decode_key_infor(bytes: &[u8]) -> Result<KeyInfor> {
+    let mut cursor = Cursor::new(bytes);
+    let sk_bytes = read_len_bytes(&mut cursor)?;
+    if sk_bytes.len() != 32 {
+        bail!("secp256k1 私钥长度应为 32 字节，实际为 {} 字节", sk_bytes.len());
+    }
+    let signing_key = SigningKey::<Secp256k1>::from_bytes(k256::FieldBytes::from_slice(&sk_bytes))
+        .context("反序列化 secp256k1 私钥失败")?;
+    let verifying_key = VerifyingKey::from(&signing_key);
+    Ok(KeyInfor {
+        signing_key,
+        verifying_key,
+    })
+}
+
+pub fn encode_device_client_infor(value: &DeviceClientInfor) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    append_verifying_key(&mut out, &value.verifying_key);
+    append_string(&mut out, &value.measured_value);
+    append_scalar(&mut out, &value.merkle_leaf)?;
+    append_len_bytes(&mut out, &value.evidence);
+    Ok(out)
+}
+
+pub fn decode_device_client_infor(bytes: &[u8]) -> Result<DeviceClientInfor> {
+    let mut cursor = Cursor::new(bytes);
+    Ok(DeviceClientInfor {
+        verifying_key: read_verifying_key(&mut cursor)?,
+        measured_value: read_string(&mut cursor)?,
+        merkle_leaf: read_scalar(&mut cursor)?,
+        evidence: read_len_bytes(&mut cursor)?,
+    })
+}
+
+pub fn encode_response_device_infor(value: &ResponseDeviceInfor) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    append_verifying_key(&mut out, &value.verifying_key);
+    append_duration(&mut out, value.timestamp);
+    append_duration(&mut out, value.period);
+    append_option_signature(&mut out, &value.sig);
+    append_option_scalar_vec(&mut out, &value.shrubs_path)?;
+    append_option_bool_vec(&mut out, &value.shrubs_tag);
+    Ok(out)
+}
+
+pub fn decode_response_device_infor(bytes: &[u8]) -> Result<ResponseDeviceInfor> {
+    let mut cursor = Cursor::new(bytes);
+    Ok(ResponseDeviceInfor {
+        verifying_key: read_verifying_key(&mut cursor)?,
+        timestamp: read_duration(&mut cursor)?,
+        period: read_duration(&mut cursor)?,
+        sig: read_option_signature(&mut cursor)?,
+        shrubs_path: read_option_scalar_vec(&mut cursor)?,
+        shrubs_tag: read_option_bool_vec(&mut cursor)?,
+    })
+}
+
+pub fn encode_public_context(value: &PublicContext) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    append_scalar_vec(&mut out, &value.root)?;
+    append_verifying_key(&mut out, &value.verifier_pk);
+    Ok(out)
+}
+
+pub fn decode_public_context(bytes: &[u8]) -> Result<PublicContext> {
+    let mut cursor = Cursor::new(bytes);
+    Ok(PublicContext {
+        root: read_scalar_vec(&mut cursor)?,
+        verifier_pk: read_verifying_key(&mut cursor)?,
+    })
+}
+
+pub fn encode_evidence_bundle(
+    evidence_reply: &EvidenceReply,
+    device_signature: &Signature,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    append_proof(&mut out, &evidence_reply.proof)?;
+    append_ark_vk(&mut out, &evidence_reply.vk)?;
+    append_signature(&mut out, &evidence_reply.sig);
+    append_verifying_key(&mut out, &evidence_reply.pk);
+    append_duration(&mut out, evidence_reply.timestamp);
+    append_duration(&mut out, evidence_reply.period);
+    append_scalar(&mut out, &evidence_reply.authorized_infor)?;
+    append_signature(&mut out, device_signature);
+    Ok(out)
+}
+
+pub fn decode_evidence_bundle(bytes: &[u8]) -> Result<(EvidenceReply, Signature)> {
+    let mut cursor = Cursor::new(bytes);
+    let evidence_reply = EvidenceReply {
+        proof: read_proof(&mut cursor)?,
+        vk: read_ark_vk(&mut cursor)?,
+        sig: read_signature(&mut cursor)?,
+        pk: read_verifying_key(&mut cursor)?,
+        timestamp: read_duration(&mut cursor)?,
+        period: read_duration(&mut cursor)?,
+        authorized_infor: read_scalar(&mut cursor)?,
+    };
+    let device_signature = read_signature(&mut cursor)?;
+    Ok((evidence_reply, device_signature))
+}
+
+pub fn encode_verifier_response(
+    dev_res: &ResponseDeviceInfor,
+    public_context: &PublicContext,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    append_len_bytes(&mut out, &encode_response_device_infor(dev_res)?);
+    append_len_bytes(&mut out, &encode_public_context(public_context)?);
+    Ok(out)
+}
+
+pub fn decode_verifier_response(bytes: &[u8]) -> Result<(ResponseDeviceInfor, PublicContext)> {
+    let mut cursor = Cursor::new(bytes);
+    let dev_res_bytes = read_len_bytes(&mut cursor)?;
+    let public_context_bytes = read_len_bytes(&mut cursor)?;
+    Ok((
+        decode_response_device_infor(&dev_res_bytes)?,
+        decode_public_context(&public_context_bytes)?,
+    ))
+}
+
+fn encode_typed_message(kind: &[u8; 4], payload: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + payload.len());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(&payload);
+    out
+}
+
+pub fn encode_public_context_message(public_context: &PublicContext) -> Result<Vec<u8>> {
+    Ok(encode_typed_message(MSG_PUBLIC_CONTEXT, encode_public_context(public_context)?))
+}
+
+pub fn decode_public_context_message(bytes: &[u8]) -> Result<PublicContext> {
+    if !bytes.starts_with(MSG_PUBLIC_CONTEXT) {
+        bail!("不是 PublicContext 消息");
+    }
+    decode_public_context(&bytes[MSG_PUBLIC_CONTEXT.len()..])
+}
+
+pub fn encode_evidence_message(
+    evidence_reply: &EvidenceReply,
+    device_signature: &Signature,
+) -> Result<Vec<u8>> {
+    Ok(encode_typed_message(
+        MSG_EVIDENCE,
+        encode_evidence_bundle(evidence_reply, device_signature)?,
+    ))
+}
+
+pub fn decode_evidence_message(bytes: &[u8]) -> Result<(EvidenceReply, Signature)> {
+    if !bytes.starts_with(MSG_EVIDENCE) {
+        bail!("不是 Evidence 消息");
+    }
+    decode_evidence_bundle(&bytes[MSG_EVIDENCE.len()..])
+}
+
+pub async fn tcp_send_frame(stream: &mut TcpStream, payload: &[u8]) -> Result<()> {
+    let len = payload.len() as u64;
+    stream
+        .write_all(&len.to_be_bytes())
+        .await
+        .context("TCP 发送消息长度失败")?;
+    stream
+        .write_all(payload)
+        .await
+        .context("TCP 发送消息体失败")?;
+    stream.flush().await.context("TCP flush 失败")?;
+    Ok(())
+}
+
+pub async fn tcp_read_frame(stream: &mut TcpStream) -> Result<Vec<u8>> {
+    let mut len_buf = [0u8; 8];
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .context("TCP 读取消息长度失败")?;
+    let len = u64::from_be_bytes(len_buf);
+    if len > MAX_TCP_FRAME_LEN {
+        bail!("TCP 消息过大: {} bytes", len);
+    }
+
+    let mut payload = vec![0u8; len as usize];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .context("TCP 读取消息体失败")?;
+    Ok(payload)
 }
 
 pub fn save_key_infor(path: impl AsRef<Path>, key: &KeyInfor) -> Result<()> {
