@@ -135,3 +135,91 @@ fn quotient_witness_polynomial(poly: &Poly, z: Fr) -> Result<Poly, PcError> {
     
     Ok(q.into())
 }
+
+pub fn create_witness(
+    srs: &Srs,
+    poly: &Poly,
+    poly_index_i: usize,
+    point_j: Fr,
+    rho: Fr,
+) -> Result<Witness, PcError> {
+    let degree = poly.degree();
+    if degree > srs.max_degree {
+        return Err(PcError::DegreeTooLarge {
+            degree,
+            max_degree: srs.max_degree,
+        });
+    }
+    let q = quotient_witness_polynomial(poly, point_j)?;
+    let rho_i = rho.pow([poly_index_i as u64]);
+    let scale = point_j * rho_i;
+    let mut acc = G1Projective::zero();
+    for (l, coeff) in q.coeffs.iter().enumerate() {
+        if coeff.is_zero() {
+            continue;
+        }
+        let basis = srs.gamma_g_powers[l];
+        acc += basis.mul_bigint(coeff.into_bigint());
+    }
+
+    let w = acc * scale;
+
+    let mut acc2 = G2Projective::zero();
+    for (l, coeff) in q.coeffs.iter().enumerate() {
+        if coeff.is_zero() {
+            continue;
+        }
+        let basis = srs.gamma_h_powers[l];
+        acc2 += basis.mul_bigint(coeff.into_bigint());
+    }
+
+    let w2 = acc2 * scale;
+
+    Ok(Witness(w.into_affine(),w2.into_affine()))
+}
+
+
+pub fn verify_aggregated(
+    srs: &Srs,
+    commitments: &[Commitment],
+    shares: &[Share],
+    witnesses: &[Witness],
+    point_j: Fr,
+    rho: Fr,
+) -> Result<bool, PcError> {
+    if commitments.is_empty() || shares.is_empty() || witnesses.is_empty()  {
+        return Err(PcError::EmptyInput);
+    }
+    if commitments.len() != shares.len() || shares.len() != witnesses.len() {
+        return Err(PcError::InconsistentInputLengths);
+    }
+
+    let mut v1 = G1Projective::zero();
+    let mut v2 = G1Projective::zero();
+    let mut wj = G1Projective::zero();
+    let mut wj2 = G2Projective::zero();
+
+    for i in 0..commitments.len() {
+        let rho_i = rho.pow([(i + 1) as u64]); 
+        v1 += commitments[i].0.mul_bigint(rho_i.into_bigint());
+        v2 += srs.g.mul_bigint((rho_i * shares[i].0).into_bigint());
+        wj += witnesses[i].0.into_group();
+        wj2 += witnesses[i].1.into_group();
+    }
+
+    let lhs_g1 = v1 - v2 +wj;
+    let lhs = Bls12_381::pairing(lhs_g1, srs.h);
+
+    let gamma_g = srs.gamma_g_powers[1];
+
+    
+    let point_j_inv = point_j.inverse().unwrap();
+    let rhs = Bls12_381::pairing(gamma_g, (  wj2 *  point_j_inv ).into_affine());
+
+    Ok(lhs == rhs)
+}
+
+pub fn poly_from_coeffs(coeffs: &[u64]) -> Poly {
+    let coeffs_fr = coeffs.par_iter().map(|x| Fr::from(*x)).collect::<Vec<_>>();
+    DensePolynomial::from_coefficients_vec(coeffs_fr)
+}
