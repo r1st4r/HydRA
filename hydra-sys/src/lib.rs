@@ -532,7 +532,8 @@ fn append_len_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 
 fn read_exact<const N: usize>(cursor: &mut Cursor<&[u8]>) -> Result<[u8; N]> {
     let mut buf = [0u8; N];
-    cursor.read_exact(&mut buf).context("读取二进制字段失败")?;
+   std::io::Read::read_exact(cursor, &mut buf)
+    .context("读取二进制字段失败")?;
     Ok(buf)
 }
 
@@ -547,7 +548,9 @@ fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32> {
 fn read_len_bytes(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>> {
     let len = read_u64(cursor)? as usize;
     let mut bytes = vec![0u8; len];
-    cursor.read_exact(&mut bytes).context("读取变长二进制字段失败")?;
+   // cursor.read_exact(&mut bytes).context("读取变长二进制字段失败")?;
+  std::io::Read::read_exact(cursor, &mut bytes)
+    .context("读取变长二进制字段失败")?;
     Ok(bytes)
 }
 

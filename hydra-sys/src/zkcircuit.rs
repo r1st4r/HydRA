@@ -35,11 +35,11 @@ impl<'a,  HG: FieldHasherGadget<BlsScalar>> AttestationCircuit<'a, HG> {
     ) -> Self {
         Self {
             pk: BlsScalar::from(BigUint::from_bytes_be(device_config.verifying_key.to_encoded_point(true).as_bytes())),  //BlsScalar::from(BigUint::from_bytes_be(device_config.verifying_key.to_encoded_point(true).as_bytes()))
-            sk: BlsScalar::from(BigUint::from_bytes_be(&device_config.signing_key.to_bytes()[..])), //  BlsScalar::from(BigUint::from_bytes_be(&device_config.signing_key.to_bytes()[..]))
-            ar: device_config.measured_value,
-            period: device_config.period,
+            sk:  BlsScalar::from(BigUint::from_bytes_be(&device_config.signing_key.to_bytes()[..])), //  BlsScalar::from(BigUint::from_bytes_be(device_config.signing_key.to_bytes()[..]))
+            ar: device_config.measured_value, 
+            period: BlsScalar::from(device_config.period.as_secs()),  //BlsScalar::from(device_config.period.as_secs())
             output: device_config.authorized_infor,
-            time: device_config.timestamp,
+            time: BlsScalar::from(device_config.timestamp.as_secs()), //BlsScalar::from(device_config.timestamp.as_secs())
             root,
             path,
             tag,

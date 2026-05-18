@@ -77,11 +77,11 @@ pub fn create_batch_devices(
         return;
     }
 
-    for i in leaves.iter() {
-        println!("leaves: {}", i);
-    }
+    // for i in leaves.iter() {
+    //     println!("leaves: {}", i);
+    // }
 
-    println!("------------");
+    // println!("------------");
 
     let temp: Vec<BlsScalar> = leaves
         .par_chunks(2)
@@ -251,14 +251,14 @@ fn largest_power_two_leq(n: usize) -> usize {
 
 pub fn find_interval_index(
     arr: &[BlsScalar],
-    target: BlsScalar,
+    target: &BlsScalar,
 ) -> Option<(Vec<BlsScalar>, usize)> {
     if arr.is_empty() {
         return None;
     }
 
 
-    let target_index = arr.iter().position(|x| *x == target)?;
+    let target_index = arr.iter().position(|x| x == target)?;
 
     let mut start = 0usize;
     let mut remaining = arr.len();

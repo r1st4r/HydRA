@@ -1,4 +1,8 @@
- 
+
 [workspace]
-members = ["dqea", "hydra_system"]
-resolver = "2"
+members = ["attester", "verifier", "relying-party", "hydra-sys"]
+resolver = "3"
+
+
+
+[workspace.dependencies]
