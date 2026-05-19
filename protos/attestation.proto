@@ -1,1 +1,103 @@
+syntax = "proto3";
 
+package attestation;
+
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  MODE_PASSPORT = 1;
+  MODE_BACKGROUND_CHECK = 2;
+  MODE_MIX = 3;
+}
+
+enum Tee {
+  TEE_UNSPECIFIED = 0;
+  TEE_CCA = 1;
+  TEE_TDX = 2;
+  TEE_CSV = 3;
+  TEE_KUNPENG = 4;
+}
+
+enum ErrorCode {
+  ErrorCode_OK = 0;
+  ErrorCode_INVALID_ARGUMENT = 1;
+  ErrorCode_INTERNAL = 2;
+  ErrorCode_UNSUPPORTED_MODE = 3;
+}
+
+message Evidence {
+  bytes init_data = 1;
+  bytes runtime_data = 2;
+}
+
+message EvidenceList {
+  repeated Evidence evidence = 1;
+}
+
+message ChallengeRequest {
+  Mode mode = 1;
+  bytes nonce = 2;
+}
+
+message ChallengeResponse {
+  ErrorCode error_code = 1;
+  bytes nonce = 2;
+  bytes challenge_token = 3;
+}
+
+message AttestationRequest {
+  Mode mode = 1;
+  bytes challenge_token = 2;
+}
+
+message AttestationResponse {
+  ErrorCode error_code = 1;
+  oneof result {
+    EvidenceList evidence_list = 2;
+    bytes attestation_token = 3;
+  }
+}
+
+message VerificationRequest {
+  repeated Evidence evidence = 1;
+  bytes challenge_token = 2;
+}
+
+message VerificationResponse {
+  ErrorCode error_code = 1;
+  bytes attestation_token = 2;
+}
+
+message VerifierRequest {
+  Tee tee = 1;
+  bytes evidence = 2;
+  bytes challenge_token = 3;
+  string evidence_source = 4;
+}
+
+message VerifierResponse {
+  ErrorCode error_code = 1;
+  bytes attestation_token = 2;
+}
+
+message VerifierChallengeRequest {
+  Tee tee = 1;
+  Mode mode = 2;
+  bytes nonce = 3;
+}
+
+message VerifierChallengeResponse {
+  ErrorCode error_code = 1;
+  bytes nonce = 2;
+  bytes challenge_token = 3;
+}
+
+service AttestationService {
+    rpc GetChallenge(ChallengeRequest) returns (ChallengeResponse) {};
+    rpc AttestationEvaluate(AttestationRequest) returns (AttestationResponse) {};
+    rpc VerificationEvaluate(VerificationRequest) returns (VerificationResponse) {};
+}
+
+service VerifierService {
+    rpc IssueChallenge(VerifierChallengeRequest) returns (VerifierChallengeResponse) {};
+    rpc Verify(VerifierRequest) returns (VerifierResponse) {};
+}
