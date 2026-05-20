@@ -1,53 +1,63 @@
-use std::collections::BTreeMap;
-use std::path::Path;
-
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
 
-use crate::model::{DeviceRecord, DeviceStatus};
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct FileRegistry {
-    devices: BTreeMap<String, DeviceRecord>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceEvidence {
+    pub message_b64: String,
+    pub signature_b64: String,
+    pub produced_at: DateTime<Utc>,
 }
 
-impl FileRegistry {
-    pub fn load_or_default(path: &Path) -> anyhow::Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-
-        let bytes = std::fs::read(path)?;
-        Ok(serde_json::from_slice(&bytes)?)
+impl DeviceEvidence {
+    pub fn sha256_hex(&self) -> Result<String, EvidenceError> {
+        let bytes = serde_json::to_vec(self)?;
+        Ok(hex::encode(Sha256::digest(bytes)))
     }
+}
 
-    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let bytes = serde_json::to_vec_pretty(self)?;
-        std::fs::write(path, bytes)?;
-        Ok(())
-    }
+#[derive(Debug, Error)]
+pub enum EvidenceError {
+    #[error("base64 decode failed: {0}")]
+    Base64(#[from] base64::DecodeError),
 
-    pub fn get_by_hash(&self, public_key_hash: &str) -> Option<&DeviceRecord> {
-        self.devices.get(public_key_hash)
-    }
+    #[error("public key must be 32 bytes, got {0}")]
+    InvalidPublicKeyLength(usize),
 
-    pub fn upsert(&mut self, record: DeviceRecord) {
-        self.devices
-            .insert(record.public_key_hash_hex.clone(), record);
-    }
+    #[error("signature must be 64 bytes, got {0}")]
+    InvalidSignatureLength(usize),
 
-    pub fn expire_trusted(&mut self, now: DateTime<Utc>) -> usize {
-        let mut expired = 0;
-        for record in self.devices.values_mut() {
-            if record.should_expire(now) {
-                record.status = DeviceStatus::Expired;
-                record.updated_at = now;
-                expired += 1;
-            }
-        }
-        expired
-    }
+    #[error("invalid Ed25519 public key")]
+    InvalidPublicKey,
+
+    #[error("serde error: {0}")]
+    Serde(#[from] serde_json::Error),
+}
+
+pub fn verify_device_evidence(
+    public_key_b64: &str,
+    evidence: &DeviceEvidence,
+) -> Result<bool, EvidenceError> {
+    let public_key_bytes = STANDARD.decode(public_key_b64)?;
+    let message = STANDARD.decode(&evidence.message_b64)?;
+    let signature_bytes = STANDARD.decode(&evidence.signature_b64)?;
+
+    let public_key_array: [u8; 32] = public_key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| EvidenceError::InvalidPublicKeyLength(public_key_bytes.len()))?;
+    let signature_array: [u8; 64] = signature_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| EvidenceError::InvalidSignatureLength(signature_bytes.len()))?;
+
+    let verifying_key =
+        VerifyingKey::from_bytes(&public_key_array).map_err(|_| EvidenceError::InvalidPublicKey)?;
+    let signature = Signature::from_bytes(&signature_array);
+
+    Ok(verifying_key.verify(&message, &signature).is_ok())
 }
