@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
         &hasher_dev,
     );
 
-    println!("已生成设备证据，准备发送给 relying-party ...");
+    println!("已生成 attester 证据，准备发送给 relying-party ...");
 
     let mut relying_party_stream = TcpStream::connect(&relying_party_addr)
         .await

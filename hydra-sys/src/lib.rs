@@ -2,12 +2,19 @@ pub mod poseidon;
 pub mod zkcircuit;
 pub mod shurbstree;
 
-use ark_bls12_381::{Bls12_381, Fr as BlsScalar};
+use ark_bls12_381::Bls12_381;
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
+pub use ark_bls12_381::Fr as BlsScalar;
 use shurbstree::{find_shrubs_path,find_interval_index,insert_shrubs_tree,exponents_of_two};
-use arkworks_native_gadgets::poseidon::{Poseidon,FieldHasher};
-use rand_core::OsRng;
+use arkworks_native_gadgets::poseidon::FieldHasher;
+pub use arkworks_native_gadgets::poseidon::Poseidon;
+use rand_core::{OsRng, RngCore};
 use ecdsa::{SigningKey, VerifyingKey};
-use k256::Secp256k1;
+use hkdf::Hkdf;
+use k256::{PublicKey, Secp256k1, sha2::Sha256};
 use num_bigint::BigUint;
 use std::fs;
 use std::time::{Duration,SystemTime, UNIX_EPOCH};
@@ -22,7 +29,7 @@ use arkworks_r1cs_gadgets::poseidon::PoseidonGadget;
 use ark_std::UniformRand;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use anyhow::{Context, Result, bail};
@@ -35,6 +42,7 @@ type RACircuit<'a> = crate::zkcircuit::AttestationCircuit<'a, PoseidonGadget<Bls
 pub const DATA_DIR_NAME: &str = "workspace-data";
 pub const ATTESTER_KEY_FILE: &str = "attester_key.bin";
 pub const DEVICE_INFOR_FILE: &str = "dev_infor.bin";
+pub const DEVICE_CONFIG_FILE: &str = "dev_config.bin";
 pub const VERIFIER_KEY_FILE: &str = "verifier_key.bin";
 pub const VERIFIER_RESPONSE_FILE: &str = "dev_res.bin";
 pub const PUBLIC_CONTEXT_FILE: &str = "public_context.bin";
@@ -43,6 +51,8 @@ pub const EVIDENCE_FILE: &str = "evidence.bin";
 pub const DEFAULT_VERIFIER_ADDR: &str = "127.0.0.1:7001";
 pub const DEFAULT_RELYING_PARTY_ADDR: &str = "127.0.0.1:7002";
 pub const MAX_TCP_FRAME_LEN: u64 = 512 * 1024 * 1024;
+pub const MSG_DEVICE_INFOR: &[u8; 4] = b"DINF";
+pub const MSG_RELYING_PARTY_DEVICE_INFOR: &[u8; 4] = b"RDIN";
 pub const MSG_PUBLIC_CONTEXT: &[u8; 4] = b"PUBC";
 pub const MSG_EVIDENCE: &[u8; 4] = b"EVID";
 
@@ -60,6 +70,13 @@ pub fn workspace_data_file(name: &str) -> PathBuf {
 
 pub fn ensure_workspace_data_dir() -> Result<()> {
     fs::create_dir_all(workspace_data_dir()).context("创建 workspace-data 目录失败")
+}
+
+fn ensure_parent_dir(path: impl AsRef<Path>) -> Result<()> {
+    if let Some(parent) = path.as_ref().parent() {
+        fs::create_dir_all(parent).context("创建目标文件父目录失败")?;
+    }
+    Ok(())
 }
 
 pub fn read_measurement_file() -> String {
@@ -161,23 +178,75 @@ fn serialize_duration(duration: &Duration) -> Vec<u8> {
     bytes
 }
 
-#[derive(Debug)]
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Model {
+    Passport,
+    BackgroundCheck,
+}
+
+impl Model {
+    pub fn from_arg(value: &str) -> Result<Self> {
+        match value {
+            "passport" => Ok(Self::Passport),
+            "background_check" | "background-check" => Ok(Self::BackgroundCheck),
+            other => bail!("unknown mode: {other}; expected passport or background_check"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct DeviceClientInfor {
+    pub mode: Model,
     pub verifying_key: VerifyingKey<Secp256k1>,
     pub measured_value: String,
-    pub merkle_leaf: BlsScalar,
+    pub merkle_leaf: Option<BlsScalar>,
     pub evidence: Vec<u8>,
 }
 impl DeviceClientInfor  {
     pub fn new(vk: VerifyingKey<Secp256k1>,leaf: BlsScalar) -> DeviceClientInfor {
+        Self::new_with_mode(Model::Passport, vk, Some(leaf))
+    }
+
+    pub fn new_with_mode(mode: Model, vk: VerifyingKey<Secp256k1>,leaf: Option<BlsScalar>) -> DeviceClientInfor {
         let measure = read_measurement_file();
+        let merkle_leaf = match mode {
+            Model::Passport => leaf,
+            Model::BackgroundCheck => None,
+        };
         DeviceClientInfor {
+            mode,
             verifying_key: vk,
-            merkle_leaf: leaf,
+            merkle_leaf,
             measured_value: measure,
             evidence: vec![32,35,35],
         }
     }
+}
+
+pub struct DeviceClientInforWire {
+    pub mode: Model,
+    pub verifying_key: Vec<u8>,
+    pub measured_value: String,
+    pub merkle_leaf: Option<Vec<u8>>,
+    pub evidence: Vec<u8>,
+}
+
+pub struct SignedDeviceClientInforWire {
+    pub device: DeviceClientInforWire,
+    pub signature: Vec<u8>,
+}
+
+pub struct RelyingPartySignedDeviceClientInforWire {
+    pub signed_device: SignedDeviceClientInforWire,
+    pub relying_party_verifying_key: Vec<u8>,
+    pub relying_party_signature: Vec<u8>,
+}
+
+pub struct EncryptedMessage {
+    pub ephemeral_public_key: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
 }
 
 
@@ -236,10 +305,10 @@ pub fn rely_party_verifier_sig(evidence_reply: &EvidenceReply, verifier_pk:&Veri
 
     match verifier_pk.verify(msg.as_slice(), &evidence_reply.sig) {
         Ok(_) => {
-            println!("设备签名验证成功");
+            println!("attester签名验证成功");
         }
         Err(e) => {
-            println!("设备签名验证失败: {:?}", e);
+            println!("attester签名验证失败: {:?}", e);
         }
     }
 }
@@ -286,7 +355,9 @@ impl DeviceConfigInfor {
         let ar = BlsScalar::from(BigUint::from_bytes_be(dev_cli.measured_value.as_bytes()));
         let time = BlsScalar::from(dec_res.timestamp.as_secs());
         let peri = BlsScalar::from(dec_res.period.as_secs());
-        let leaf = dev_cli.merkle_leaf;
+        let leaf = dev_cli
+            .merkle_leaf
+            .expect("passport mode requires merkle_leaf");
         let output = generate_verifier_authoried_infor(ar, pk, time, peri, hasher);
 
         DeviceConfigInfor {
@@ -337,8 +408,11 @@ pub fn generate_device_merkle_leaf(
 
     leaf
 }
+#[derive(Clone)]
 pub struct ResponseDeviceInfor {
+    pub mode: Model,
     pub verifying_key: VerifyingKey<Secp256k1>,
+    pub attester_addr: String,
     pub timestamp: Duration,
     pub period: Duration,
     pub sig : Option<Signature>,
@@ -348,9 +422,15 @@ pub struct ResponseDeviceInfor {
 
 impl ResponseDeviceInfor {
     pub fn new(pk: VerifyingKey<Secp256k1>) ->  ResponseDeviceInfor {
+        Self::new_with_mode(Model::Passport, pk)
+    }
+
+    pub fn new_with_mode(mode: Model, pk: VerifyingKey<Secp256k1>) ->  ResponseDeviceInfor {
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).expect("获取系统时间失败");
         let period = Duration::from_secs(8640000 as u64);
          ResponseDeviceInfor {
+            mode,
+            attester_addr: String::new(),
             timestamp,
             period, 
             verifying_key:pk,
@@ -368,6 +448,17 @@ impl ResponseDeviceInfor {
             self.shrubs_tag = Some(tag);
     }
 
+}
+
+pub struct ResponseDeviceInforWire {
+    pub mode: Model,
+    pub verifying_key: Vec<u8>,
+    pub attester_addr: String,
+    pub timestamp: Duration,
+    pub period: Duration,
+    pub sig: Option<Vec<u8>>,
+    pub shrubs_path: Option<Vec<Vec<u8>>>,
+    pub shrubs_tag: Option<Vec<bool>>,
 }
 
 pub fn generate_device_authoried_infor(
@@ -429,8 +520,19 @@ pub fn generate_device_client_infor(
     device_key: &KeyInfor,
     hasher: &Poseidon<BlsScalar>,
 ) -> DeviceClientInfor {
-    let device_leaf = generate_device_merkle_leaf(device_key, hasher);
-    DeviceClientInfor::new(device_key.verifying_key, device_leaf)
+    generate_device_client_infor_with_mode(device_key, hasher, Model::Passport)
+}
+
+pub fn generate_device_client_infor_with_mode(
+    device_key: &KeyInfor,
+    hasher: &Poseidon<BlsScalar>,
+    mode: Model,
+) -> DeviceClientInfor {
+    let device_leaf = match mode {
+        Model::Passport => Some(generate_device_merkle_leaf(device_key, hasher)),
+        Model::BackgroundCheck => None,
+    };
+    DeviceClientInfor::new_with_mode(mode, device_key.verifying_key, device_leaf)
 }
 
 pub fn generate_verifier_resonse_infor_1(
@@ -439,11 +541,14 @@ pub fn generate_verifier_resonse_infor_1(
     leaves: &mut Vec<BlsScalar>,
     hasher: &Poseidon<BlsScalar>,
 ) -> ResponseDeviceInfor {
-    let mut device_resp = ResponseDeviceInfor::new(devices_infor.verifying_key);
+    let mut device_resp = ResponseDeviceInfor::new_with_mode(devices_infor.mode, devices_infor.verifying_key);
     let device_author_infor = generate_device_authoried_infor(devices_infor, &device_resp, hasher);
     let sig = verifier_compute_sig(verifier_key, &device_resp, &device_author_infor);
     device_resp.set_signature(&sig);
-    leaves.push(devices_infor.merkle_leaf);
+    let merkle_leaf = devices_infor
+        .merkle_leaf
+        .expect("passport mode requires merkle_leaf");
+    leaves.push(merkle_leaf);
     device_resp
 }
 
@@ -471,30 +576,86 @@ pub fn generate_device_evidence(
     (evidence_reply, signature)
 }
 
+pub fn generate_device_evidence_from_config(
+    root: &[BlsScalar],
+    dev_config: &DeviceConfigInfor,
+    hasher: &Poseidon<BlsScalar>,
+) -> (EvidenceReply, Signature) {
+    let merkel_path_ref = dev_config.merkle_path.as_deref();
+    let merkel_tag_ref = dev_config.merkle_tag.as_deref();
+
+    let circuit = RACircuit::new(dev_config, root, merkel_path_ref, merkel_tag_ref, hasher);
+    let (pkk, vk) = GrothSetup::circuit_specific_setup(circuit.clone(), &mut OsRng).unwrap();
+    let proof = GrothSetup::prove(&pkk, circuit.clone(), &mut OsRng).unwrap();
+
+    let evidence_reply = EvidenceReply::new(proof, vk, dev_config);
+    let msg: Vec<u8> = evidence_reply
+        .to_signing_bytes_all_fields()
+        .expect("serialize EvidenceReply failed");
+    let signature = dev_config.signing_key.sign(&msg[..]);
+
+    (evidence_reply, signature)
+}
+
 pub fn rely_party_verification(
     root: &[BlsScalar],
     evidence_reply: &EvidenceReply,
     signature: Signature,
     verifier_pk: &VerifyingKey<Secp256k1>,
-) {
+) -> Result<bool> {
+    let attester_pubkey_hex = hex::encode(evidence_reply.pk.to_encoded_point(true).as_bytes());
     let public_inputs = evidence_reply.gen_public_inputs(root);
     let msg: Vec<u8> = evidence_reply
         .to_signing_bytes_all_fields()
         .expect("serialize EvidenceReply failed");
 
     match evidence_reply.pk.verify(&msg[..], &signature) {
-        Ok(_) => println!("设备证据签名验证成功"),
-        Err(e) => println!("设备证据签名验证失败: {:?}", e),
+        Ok(_) => println!("veirifer签名验证成功"),
+        Err(e) => println!("veirifer签名验证失败: {:?}", e),
     }
 
     rely_party_verifier_sig(evidence_reply, verifier_pk);
 
-    let res = GrothSetup::verify(&evidence_reply.vk, &public_inputs, &evidence_reply.proof).unwrap();
-    if res {
-        println!("设备证据验证成功！");
-    } else {
-        println!("设备证据验收失败！");
+    let res = match GrothSetup::verify(&evidence_reply.vk, &public_inputs, &evidence_reply.proof) {
+        Ok(res) => res,
+        Err(err) => {
+            println!(
+                "relying-party proof verification failed; attester_pubkey={}; error={:?}",
+                attester_pubkey_hex,
+                err
+            );
+            return Ok(false);
+        }
+    };
+    if !res {
+        println!(
+            "relying-party proof verification failed; attester_pubkey={}",
+            attester_pubkey_hex
+        );
     }
+    if res {
+        println!(
+            "relying-party proof verification success; attester_pubkey={}",
+            attester_pubkey_hex
+        );
+        println!("attester证据验证成功！");
+    } else {
+        println!("attester证据验收失败！");
+    }
+    Ok(res)
+}
+
+pub fn verify_evidence_reply_attester_signature(
+    evidence_reply: &EvidenceReply,
+    signature: &Signature,
+) -> Result<()> {
+    let msg: Vec<u8> = evidence_reply
+        .to_signing_bytes_all_fields()
+        .expect("serialize EvidenceReply failed");
+    evidence_reply
+        .pk
+        .verify(&msg[..], signature)
+        .context("attester EvidenceReply signature verification failed")
 }
 
 pub fn gen_leaves() -> Vec<BlsScalar> {
@@ -560,6 +721,21 @@ fn append_string(out: &mut Vec<u8>, value: &str) {
 
 fn read_string(cursor: &mut Cursor<&[u8]>) -> Result<String> {
     String::from_utf8(read_len_bytes(cursor)?).context("解析 UTF-8 字符串失败")
+}
+
+fn append_model(out: &mut Vec<u8>, value: Model) {
+    out.push(match value {
+        Model::Passport => 0,
+        Model::BackgroundCheck => 1,
+    });
+}
+
+fn read_model(cursor: &mut Cursor<&[u8]>) -> Result<Model> {
+    match read_exact::<1>(cursor)?[0] {
+        0 => Ok(Model::Passport),
+        1 => Ok(Model::BackgroundCheck),
+        other => bail!("Model tag is invalid: {}", other),
+    }
 }
 
 fn append_duration(out: &mut Vec<u8>, value: Duration) {
@@ -713,6 +889,208 @@ fn read_verifying_key(cursor: &mut Cursor<&[u8]>) -> Result<VerifyingKey<Secp256
         .context("反序列化 secp256k1 公钥失败")
 }
 
+pub fn device_client_infor_to_wire(value: &DeviceClientInfor) -> Result<DeviceClientInforWire> {
+    let merkle_leaf = match value.mode {
+        Model::Passport => Some(
+            encode_scalar(
+                value
+                    .merkle_leaf
+                    .as_ref()
+                    .context("passport mode requires merkle_leaf")?,
+            )?,
+        ),
+        Model::BackgroundCheck => None,
+    };
+
+    Ok(DeviceClientInforWire {
+        mode: value.mode,
+        verifying_key: value.verifying_key.to_encoded_point(true).as_bytes().to_vec(),
+        measured_value: value.measured_value.clone(),
+        merkle_leaf,
+        evidence: value.evidence.clone(),
+    })
+}
+
+pub fn device_client_infor_from_wire(wire: &DeviceClientInforWire) -> Result<DeviceClientInfor> {
+    let merkle_leaf = match wire.mode {
+        Model::Passport => Some(
+            decode_scalar(
+                wire.merkle_leaf
+                    .as_deref()
+                    .context("passport mode requires merkle_leaf")?,
+            )?,
+        ),
+        Model::BackgroundCheck => None,
+    };
+
+    Ok(DeviceClientInfor {
+        mode: wire.mode,
+        verifying_key: VerifyingKey::<Secp256k1>::from_sec1_bytes(&wire.verifying_key)
+            .context("decode DeviceClientInforWire verifying_key failed")?,
+        measured_value: wire.measured_value.clone(),
+        merkle_leaf,
+        evidence: wire.evidence.clone(),
+    })
+}
+
+pub fn sign_device_client_infor(
+    value: &DeviceClientInfor,
+    key: &KeyInfor,
+) -> Result<Signature> {
+    let message = encode_device_client_infor(value)?;
+    Ok(key.signing_key.sign(message.as_slice()))
+}
+
+pub fn sign_device_client_infor_to_wire(
+    value: &DeviceClientInfor,
+    key: &KeyInfor,
+) -> Result<SignedDeviceClientInforWire> {
+    let signature = sign_device_client_infor(value, key)?;
+    Ok(SignedDeviceClientInforWire {
+        device: device_client_infor_to_wire(value)?,
+        signature: encode_signature(&signature),
+    })
+}
+
+pub fn verify_signed_device_client_infor_wire(
+    signed: &SignedDeviceClientInforWire,
+) -> Result<DeviceClientInfor> {
+    let verifying_key = VerifyingKey::<Secp256k1>::from_sec1_bytes(&signed.device.verifying_key)
+        .context("decode signed DeviceClientInfor verifying_key failed")?;
+    let signature = decode_signature(&signed.signature)?;
+    let message = encode_device_client_infor_wire(&signed.device)?;
+    verifying_key
+        .verify(message.as_slice(), &signature)
+        .context("attester DeviceClientInfor signature verification failed")?;
+    device_client_infor_from_wire(&signed.device)
+}
+
+pub fn sign_relying_party_device_client_infor_to_wire(
+    signed_device: SignedDeviceClientInforWire,
+    relying_party_key: &KeyInfor,
+) -> Result<RelyingPartySignedDeviceClientInforWire> {
+    let message = encode_signed_device_client_infor_wire(&signed_device)?;
+    let signature: Signature = relying_party_key.signing_key.sign(message.as_slice());
+    Ok(RelyingPartySignedDeviceClientInforWire {
+        signed_device,
+        relying_party_verifying_key: relying_party_key
+            .verifying_key
+            .to_encoded_point(true)
+            .as_bytes()
+            .to_vec(),
+        relying_party_signature: encode_signature(&signature),
+    })
+}
+
+pub fn verify_relying_party_signed_device_client_infor_wire(
+    signed: &RelyingPartySignedDeviceClientInforWire,
+) -> Result<()> {
+    let verifying_key =
+        VerifyingKey::<Secp256k1>::from_sec1_bytes(&signed.relying_party_verifying_key)
+            .context("decode relying-party verifying_key failed")?;
+    let signature = decode_signature(&signed.relying_party_signature)?;
+    let message = encode_signed_device_client_infor_wire(&signed.signed_device)?;
+    verifying_key
+        .verify(message.as_slice(), &signature)
+        .context("relying-party DeviceClientInfor signature verification failed")
+}
+
+fn derive_aes_key(shared_secret: &[u8]) -> Result<[u8; 32]> {
+    let hk = Hkdf::<Sha256>::new(None, shared_secret);
+    let mut key = [0u8; 32];
+    hk.expand(b"hydra verifier response encryption", &mut key)
+        .map_err(|_| anyhow::anyhow!("derive AES-GCM key failed"))?;
+    Ok(key)
+}
+
+pub fn encrypt_for_device_pubkey(
+    plaintext: &[u8],
+    device_pubkey: &VerifyingKey<Secp256k1>,
+) -> Result<EncryptedMessage> {
+    let recipient_public_key =
+        PublicKey::from_sec1_bytes(device_pubkey.to_encoded_point(true).as_bytes())
+            .context("decode device public key for encryption failed")?;
+    let ephemeral_secret = k256::ecdh::EphemeralSecret::random(&mut OsRng);
+    let ephemeral_public_key = PublicKey::from(&ephemeral_secret);
+    let shared_secret = ephemeral_secret.diffie_hellman(&recipient_public_key);
+    let key = derive_aes_key(shared_secret.raw_secret_bytes().as_slice())?;
+    let cipher = Aes256Gcm::new_from_slice(&key).context("create AES-GCM cipher failed")?;
+
+    let mut nonce = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .map_err(|_| anyhow::anyhow!("encrypt verifier response failed"))?;
+
+    Ok(EncryptedMessage {
+        ephemeral_public_key: ephemeral_public_key.to_sec1_bytes().to_vec(),
+        nonce: nonce.to_vec(),
+        ciphertext,
+    })
+}
+
+pub fn decrypt_for_device_key(encrypted: &EncryptedMessage, device_key: &KeyInfor) -> Result<Vec<u8>> {
+    let ephemeral_public_key = PublicKey::from_sec1_bytes(&encrypted.ephemeral_public_key)
+        .context("decode verifier ephemeral public key failed")?;
+    let secret_key = k256::SecretKey::from_slice(&device_key.signing_key.to_bytes())
+        .context("load device secret key for decryption failed")?;
+    let shared_secret =
+        k256::ecdh::diffie_hellman(secret_key.to_nonzero_scalar(), ephemeral_public_key.as_affine());
+    let key = derive_aes_key(shared_secret.raw_secret_bytes().as_slice())?;
+    let cipher = Aes256Gcm::new_from_slice(&key).context("create AES-GCM cipher failed")?;
+    cipher
+        .decrypt(
+            Nonce::from_slice(&encrypted.nonce),
+            encrypted.ciphertext.as_ref(),
+        )
+        .map_err(|_| anyhow::anyhow!("decrypt verifier response failed"))
+}
+
+pub fn response_device_infor_to_wire(
+    value: &ResponseDeviceInfor,
+) -> Result<ResponseDeviceInforWire> {
+    let shrubs_path = match &value.shrubs_path {
+        Some(path) => Some(path.iter().map(encode_scalar).collect::<Result<Vec<_>>>()?),
+        None => None,
+    };
+
+    Ok(ResponseDeviceInforWire {
+        mode: value.mode,
+        verifying_key: value.verifying_key.to_encoded_point(true).as_bytes().to_vec(),
+        attester_addr: value.attester_addr.clone(),
+        timestamp: value.timestamp,
+        period: value.period,
+        sig: value.sig.as_ref().map(encode_signature),
+        shrubs_path,
+        shrubs_tag: value.shrubs_tag.clone(),
+    })
+}
+
+pub fn response_device_infor_from_wire(
+    wire: &ResponseDeviceInforWire,
+) -> Result<ResponseDeviceInfor> {
+    let shrubs_path = match &wire.shrubs_path {
+        Some(path) => Some(
+            path.iter()
+                .map(|item| decode_scalar(item))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        None => None,
+    };
+
+    Ok(ResponseDeviceInfor {
+        mode: wire.mode,
+        verifying_key: VerifyingKey::<Secp256k1>::from_sec1_bytes(&wire.verifying_key)
+            .context("decode ResponseDeviceInforWire verifying_key failed")?,
+        attester_addr: wire.attester_addr.clone(),
+        timestamp: wire.timestamp,
+        period: wire.period,
+        sig: wire.sig.as_deref().map(decode_signature).transpose()?,
+        shrubs_path,
+        shrubs_tag: wire.shrubs_tag.clone(),
+    })
+}
+
 fn encode_proof(value: &Proof<Bls12_381>) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     value
@@ -782,44 +1160,179 @@ pub fn decode_key_infor(bytes: &[u8]) -> Result<KeyInfor> {
 }
 
 pub fn encode_device_client_infor(value: &DeviceClientInfor) -> Result<Vec<u8>> {
+    encode_device_client_infor_wire(&device_client_infor_to_wire(value)?)
+}
+
+pub fn encode_device_client_infor_wire(value: &DeviceClientInforWire) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    append_verifying_key(&mut out, &value.verifying_key);
+    append_model(&mut out, value.mode);
+    append_len_bytes(&mut out, &value.verifying_key);
     append_string(&mut out, &value.measured_value);
-    append_scalar(&mut out, &value.merkle_leaf)?;
+    match &value.merkle_leaf {
+        Some(merkle_leaf) => {
+            out.push(1);
+            append_len_bytes(&mut out, merkle_leaf);
+        }
+        None => out.push(0),
+    }
     append_len_bytes(&mut out, &value.evidence);
     Ok(out)
 }
 
 pub fn decode_device_client_infor(bytes: &[u8]) -> Result<DeviceClientInfor> {
+    let wire = decode_device_client_infor_wire(bytes)?;
+    device_client_infor_from_wire(&wire)
+}
+
+pub fn decode_device_client_infor_wire(bytes: &[u8]) -> Result<DeviceClientInforWire> {
     let mut cursor = Cursor::new(bytes);
-    Ok(DeviceClientInfor {
-        verifying_key: read_verifying_key(&mut cursor)?,
+    Ok(DeviceClientInforWire {
+        mode: read_model(&mut cursor)?,
+        verifying_key: read_len_bytes(&mut cursor)?,
         measured_value: read_string(&mut cursor)?,
-        merkle_leaf: read_scalar(&mut cursor)?,
+        merkle_leaf: match read_exact::<1>(&mut cursor)?[0] {
+            0 => None,
+            1 => Some(read_len_bytes(&mut cursor)?),
+            other => bail!("Option<merkle_leaf> tag invalid: {}", other),
+        },
         evidence: read_len_bytes(&mut cursor)?,
     })
 }
 
-pub fn encode_response_device_infor(value: &ResponseDeviceInfor) -> Result<Vec<u8>> {
+pub fn encode_signed_device_client_infor_wire(
+    value: &SignedDeviceClientInforWire,
+) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    append_verifying_key(&mut out, &value.verifying_key);
+    append_len_bytes(&mut out, &encode_device_client_infor_wire(&value.device)?);
+    append_len_bytes(&mut out, &value.signature);
+    Ok(out)
+}
+
+pub fn decode_signed_device_client_infor_wire(
+    bytes: &[u8],
+) -> Result<SignedDeviceClientInforWire> {
+    let mut cursor = Cursor::new(bytes);
+    let device = decode_device_client_infor_wire(&read_len_bytes(&mut cursor)?)?;
+    let signature = read_len_bytes(&mut cursor)?;
+    Ok(SignedDeviceClientInforWire { device, signature })
+}
+
+pub fn encode_relying_party_signed_device_client_infor_wire(
+    value: &RelyingPartySignedDeviceClientInforWire,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    append_len_bytes(
+        &mut out,
+        &encode_signed_device_client_infor_wire(&value.signed_device)?,
+    );
+    append_len_bytes(&mut out, &value.relying_party_verifying_key);
+    append_len_bytes(&mut out, &value.relying_party_signature);
+    Ok(out)
+}
+
+pub fn decode_relying_party_signed_device_client_infor_wire(
+    bytes: &[u8],
+) -> Result<RelyingPartySignedDeviceClientInforWire> {
+    let mut cursor = Cursor::new(bytes);
+    let signed_device = decode_signed_device_client_infor_wire(&read_len_bytes(&mut cursor)?)?;
+    let relying_party_verifying_key = read_len_bytes(&mut cursor)?;
+    let relying_party_signature = read_len_bytes(&mut cursor)?;
+    Ok(RelyingPartySignedDeviceClientInforWire {
+        signed_device,
+        relying_party_verifying_key,
+        relying_party_signature,
+    })
+}
+
+pub fn encode_encrypted_message(value: &EncryptedMessage) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    append_len_bytes(&mut out, &value.ephemeral_public_key);
+    append_len_bytes(&mut out, &value.nonce);
+    append_len_bytes(&mut out, &value.ciphertext);
+    Ok(out)
+}
+
+pub fn decode_encrypted_message(bytes: &[u8]) -> Result<EncryptedMessage> {
+    let mut cursor = Cursor::new(bytes);
+    Ok(EncryptedMessage {
+        ephemeral_public_key: read_len_bytes(&mut cursor)?,
+        nonce: read_len_bytes(&mut cursor)?,
+        ciphertext: read_len_bytes(&mut cursor)?,
+    })
+}
+
+pub fn encode_response_device_infor(value: &ResponseDeviceInfor) -> Result<Vec<u8>> {
+    encode_response_device_infor_wire(&response_device_infor_to_wire(value)?)
+}
+
+pub fn encode_response_device_infor_wire(value: &ResponseDeviceInforWire) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    append_model(&mut out, value.mode);
+    append_len_bytes(&mut out, &value.verifying_key);
+    append_string(&mut out, &value.attester_addr);
     append_duration(&mut out, value.timestamp);
     append_duration(&mut out, value.period);
-    append_option_signature(&mut out, &value.sig);
-    append_option_scalar_vec(&mut out, &value.shrubs_path)?;
+    match &value.sig {
+        Some(sig) => {
+            out.push(1);
+            append_len_bytes(&mut out, sig);
+        }
+        None => out.push(0),
+    }
+    match &value.shrubs_path {
+        Some(path) => {
+            out.push(1);
+            out.extend_from_slice(&(path.len() as u64).to_be_bytes());
+            for item in path {
+                append_len_bytes(&mut out, item);
+            }
+        }
+        None => out.push(0),
+    }
     append_option_bool_vec(&mut out, &value.shrubs_tag);
     Ok(out)
 }
 
 pub fn decode_response_device_infor(bytes: &[u8]) -> Result<ResponseDeviceInfor> {
+    let wire = decode_response_device_infor_wire(bytes)?;
+    response_device_infor_from_wire(&wire)
+}
+
+pub fn decode_response_device_infor_wire(bytes: &[u8]) -> Result<ResponseDeviceInforWire> {
     let mut cursor = Cursor::new(bytes);
-    Ok(ResponseDeviceInfor {
-        verifying_key: read_verifying_key(&mut cursor)?,
-        timestamp: read_duration(&mut cursor)?,
-        period: read_duration(&mut cursor)?,
-        sig: read_option_signature(&mut cursor)?,
-        shrubs_path: read_option_scalar_vec(&mut cursor)?,
-        shrubs_tag: read_option_bool_vec(&mut cursor)?,
+    let mode = read_model(&mut cursor)?;
+    let verifying_key = read_len_bytes(&mut cursor)?;
+    let attester_addr = read_string(&mut cursor)?;
+    let timestamp = read_duration(&mut cursor)?;
+    let period = read_duration(&mut cursor)?;
+    let sig = match read_exact::<1>(&mut cursor)?[0] {
+        0 => None,
+        1 => Some(read_len_bytes(&mut cursor)?),
+        other => bail!("Option<Signature bytes> tag invalid: {}", other),
+    };
+    let shrubs_path = match read_exact::<1>(&mut cursor)?[0] {
+        0 => None,
+        1 => {
+            let len = read_u64(&mut cursor)? as usize;
+            let mut path = Vec::with_capacity(len);
+            for _ in 0..len {
+                path.push(read_len_bytes(&mut cursor)?);
+            }
+            Some(path)
+        }
+        other => bail!("Option<Vec<Vec<u8>>> tag invalid: {}", other),
+    };
+    let shrubs_tag = read_option_bool_vec(&mut cursor)?;
+
+    Ok(ResponseDeviceInforWire {
+        mode,
+        verifying_key,
+        attester_addr,
+        timestamp,
+        period,
+        sig,
+        shrubs_path,
+        shrubs_tag,
     })
 }
 
@@ -889,11 +1402,68 @@ pub fn decode_verifier_response(bytes: &[u8]) -> Result<(ResponseDeviceInfor, Pu
     ))
 }
 
+pub fn encode_encrypted_verifier_response(
+    dev_res: &ResponseDeviceInfor,
+    public_context: &PublicContext,
+    device_pubkey: &VerifyingKey<Secp256k1>,
+) -> Result<Vec<u8>> {
+    let plaintext = encode_verifier_response(dev_res, public_context)?;
+    let encrypted = encrypt_for_device_pubkey(&plaintext, device_pubkey)?;
+    encode_encrypted_message(&encrypted)
+}
+
+pub fn decode_encrypted_verifier_response(
+    bytes: &[u8],
+    device_key: &KeyInfor,
+) -> Result<(ResponseDeviceInfor, PublicContext)> {
+    let encrypted = decode_encrypted_message(bytes)?;
+    let plaintext = decrypt_for_device_key(&encrypted, device_key)?;
+    decode_verifier_response(&plaintext)
+}
+
 fn encode_typed_message(kind: &[u8; 4], payload: Vec<u8>) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + payload.len());
     out.extend_from_slice(kind);
     out.extend_from_slice(&payload);
     out
+}
+
+pub fn encode_signed_device_client_infor_message(
+    value: &SignedDeviceClientInforWire,
+) -> Result<Vec<u8>> {
+    Ok(encode_typed_message(
+        MSG_DEVICE_INFOR,
+        encode_signed_device_client_infor_wire(value)?,
+    ))
+}
+
+pub fn decode_signed_device_client_infor_message(
+    bytes: &[u8],
+) -> Result<SignedDeviceClientInforWire> {
+    if !bytes.starts_with(MSG_DEVICE_INFOR) {
+        bail!("不是 DeviceClientInfor 消息");
+    }
+    decode_signed_device_client_infor_wire(&bytes[MSG_DEVICE_INFOR.len()..])
+}
+
+pub fn encode_relying_party_signed_device_client_infor_message(
+    value: &RelyingPartySignedDeviceClientInforWire,
+) -> Result<Vec<u8>> {
+    Ok(encode_typed_message(
+        MSG_RELYING_PARTY_DEVICE_INFOR,
+        encode_relying_party_signed_device_client_infor_wire(value)?,
+    ))
+}
+
+pub fn decode_relying_party_signed_device_client_infor_message(
+    bytes: &[u8],
+) -> Result<RelyingPartySignedDeviceClientInforWire> {
+    if !bytes.starts_with(MSG_RELYING_PARTY_DEVICE_INFOR) {
+        bail!("not a RelyingPartySignedDeviceClientInfor message");
+    }
+    decode_relying_party_signed_device_client_infor_wire(
+        &bytes[MSG_RELYING_PARTY_DEVICE_INFOR.len()..],
+    )
 }
 
 pub fn encode_public_context_message(public_context: &PublicContext) -> Result<Vec<u8>> {
@@ -958,7 +1528,7 @@ pub async fn tcp_read_frame(stream: &mut TcpStream) -> Result<Vec<u8>> {
 }
 
 pub fn save_key_infor(path: impl AsRef<Path>, key: &KeyInfor) -> Result<()> {
-    ensure_workspace_data_dir()?;
+    ensure_parent_dir(path.as_ref())?;
     let mut out = Vec::new();
     append_len_bytes(&mut out, &key.signing_key.to_bytes()[..]);
     fs::write(path, out).context("保存 KeyInfor 失败")
@@ -981,53 +1551,71 @@ pub fn load_key_infor(path: impl AsRef<Path>) -> Result<KeyInfor> {
 }
 
 pub fn save_device_client_infor(path: impl AsRef<Path>, value: &DeviceClientInfor) -> Result<()> {
-    ensure_workspace_data_dir()?;
-    let mut out = Vec::new();
-    append_verifying_key(&mut out, &value.verifying_key);
-    append_string(&mut out, &value.measured_value);
-    append_scalar(&mut out, &value.merkle_leaf)?;
-    append_len_bytes(&mut out, &value.evidence);
+    ensure_parent_dir(path.as_ref())?;
+    let out = encode_device_client_infor(value)?;
     fs::write(path, out).context("保存 DeviceClientInfor 失败")
 }
 
 pub fn load_device_client_infor(path: impl AsRef<Path>) -> Result<DeviceClientInfor> {
     let bytes = fs::read(path).context("读取 DeviceClientInfor 失败")?;
-    let mut cursor = Cursor::new(bytes.as_slice());
-    Ok(DeviceClientInfor {
-        verifying_key: read_verifying_key(&mut cursor)?,
-        measured_value: read_string(&mut cursor)?,
-        merkle_leaf: read_scalar(&mut cursor)?,
-        evidence: read_len_bytes(&mut cursor)?,
-    })
+    decode_device_client_infor(&bytes)
 }
 
 pub fn save_response_device_infor(path: impl AsRef<Path>, value: &ResponseDeviceInfor) -> Result<()> {
-    ensure_workspace_data_dir()?;
-    let mut out = Vec::new();
-    append_verifying_key(&mut out, &value.verifying_key);
-    append_duration(&mut out, value.timestamp);
-    append_duration(&mut out, value.period);
-    append_option_signature(&mut out, &value.sig);
-    append_option_scalar_vec(&mut out, &value.shrubs_path)?;
-    append_option_bool_vec(&mut out, &value.shrubs_tag);
+    ensure_parent_dir(path.as_ref())?;
+    let out = encode_response_device_infor(value)?;
     fs::write(path, out).context("保存 ResponseDeviceInfor 失败")
 }
 
 pub fn load_response_device_infor(path: impl AsRef<Path>) -> Result<ResponseDeviceInfor> {
     let bytes = fs::read(path).context("读取 ResponseDeviceInfor 失败")?;
+    decode_response_device_infor(&bytes)
+}
+
+pub fn save_device_config_infor(path: impl AsRef<Path>, value: &DeviceConfigInfor) -> Result<()> {
+    ensure_parent_dir(path.as_ref())?;
+    let mut out = Vec::new();
+    append_len_bytes(&mut out, &value.signing_key.to_bytes()[..]);
+    append_verifying_key(&mut out, &value.verifying_key);
+    append_scalar(&mut out, &value.measured_value)?;
+    append_duration(&mut out, value.timestamp);
+    append_duration(&mut out, value.period);
+    append_scalar(&mut out, &value.merkle_leaf)?;
+    append_option_scalar_vec(&mut out, &value.merkle_path)?;
+    append_option_bool_vec(&mut out, &value.merkle_tag);
+    append_scalar(&mut out, &value.authorized_infor)?;
+    append_option_signature(&mut out, &value.signature);
+    fs::write(path, out).context("save DeviceConfigInfor failed")
+}
+
+pub fn load_device_config_infor(path: impl AsRef<Path>) -> Result<DeviceConfigInfor> {
+    let bytes = fs::read(path).context("read DeviceConfigInfor failed")?;
     let mut cursor = Cursor::new(bytes.as_slice());
-    Ok(ResponseDeviceInfor {
+    let sk_bytes = read_len_bytes(&mut cursor)?;
+    if sk_bytes.len() != 32 {
+        bail!(
+            "secp256k1 secret key length must be 32 bytes, got {}",
+            sk_bytes.len()
+        );
+    }
+    let signing_key = SigningKey::<Secp256k1>::from_bytes(k256::FieldBytes::from_slice(&sk_bytes))
+        .context("decode DeviceConfigInfor secret key failed")?;
+    Ok(DeviceConfigInfor {
+        signing_key,
         verifying_key: read_verifying_key(&mut cursor)?,
+        measured_value: read_scalar(&mut cursor)?,
         timestamp: read_duration(&mut cursor)?,
         period: read_duration(&mut cursor)?,
-        sig: read_option_signature(&mut cursor)?,
-        shrubs_path: read_option_scalar_vec(&mut cursor)?,
-        shrubs_tag: read_option_bool_vec(&mut cursor)?,
+        merkle_leaf: read_scalar(&mut cursor)?,
+        merkle_path: read_option_scalar_vec(&mut cursor)?,
+        merkle_tag: read_option_bool_vec(&mut cursor)?,
+        authorized_infor: read_scalar(&mut cursor)?,
+        signature: read_option_signature(&mut cursor)?,
     })
 }
 
 pub fn save_public_context(path: impl AsRef<Path>, value: &PublicContext) -> Result<()> {
-    ensure_workspace_data_dir()?;
+    ensure_parent_dir(path.as_ref())?;
     let mut out = Vec::new();
     append_scalar_vec(&mut out, &value.root)?;
     append_verifying_key(&mut out, &value.verifier_pk);
@@ -1048,7 +1636,7 @@ pub fn save_evidence_bundle(
     evidence_reply: &EvidenceReply,
     device_signature: &Signature,
 ) -> Result<()> {
-    ensure_workspace_data_dir()?;
+    ensure_parent_dir(path.as_ref())?;
     let mut out = Vec::new();
     append_proof(&mut out, &evidence_reply.proof)?;
     append_ark_vk(&mut out, &evidence_reply.vk)?;
@@ -1058,11 +1646,11 @@ pub fn save_evidence_bundle(
     append_duration(&mut out, evidence_reply.period);
     append_scalar(&mut out, &evidence_reply.authorized_infor)?;
     append_signature(&mut out, device_signature);
-    fs::write(path, out).context("保存 EvidenceReply 与设备签名失败")
+    fs::write(path, out).context("保存 EvidenceReply 与attester签名失败")
 }
 
 pub fn load_evidence_bundle(path: impl AsRef<Path>) -> Result<(EvidenceReply, Signature)> {
-    let bytes = fs::read(path).context("读取 EvidenceReply 与设备签名失败")?;
+    let bytes = fs::read(path).context("读取 EvidenceReply 与attester签名失败")?;
     let mut cursor = Cursor::new(bytes.as_slice());
     let evidence_reply = EvidenceReply {
         proof: read_proof(&mut cursor)?,

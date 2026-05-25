@@ -22,9 +22,9 @@ pub fn insert_shrubs_tree(
     mut ll: usize,
     hasher: &Poseidon<BlsScalar>,
 )  {
-    for i in vect.iter() {
-        println!("leaves: {}", i);
-    }
+    // for i in vect.iter() {
+    //     println!("leaves: {}", i);
+    // }
      println!("***********");
     let should_insert_root = ll < exps.len() && k + 2 == exps[ll];
 
