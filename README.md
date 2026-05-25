@@ -564,9 +564,4 @@ cargo run -p attester -- passport 127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 1
 cargo run -p attester -- background_check 127.0.0.1:7002 127.0.0.1:7003 127.0.0.1:7004
 ```
 
-## 14. 总结
-
-本项目实现了一个完整的三方验证系统。attester 负责生成身份和证明，verifier 负责维护动态 shrubs tree 并更新路径信息，relying-party 负责验证最终零知识证明。
-
-系统支持多 attester、多 relying-party、签名验证、加密响应、零知识证明验证、动态路径更新和本地 session 隔离，适合用于演示基于 attester 身份与零知识证明的验证流程。
 
